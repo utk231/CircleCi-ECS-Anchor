@@ -1,0 +1,240 @@
+version: 2
+anchors:
+  steps: &steps
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Install Docker client and AWS CLI
+          command: |
+            apk add --no-cache --update ca-certificates curl-dev curl py2-pip bash jq && update-ca-certificates
+            pip install awscli --upgrade
+            chmod +x scripts/build/tag.sh
+            chmod +x scripts/build/release.sh
+            chmod +x scripts/build/fail.sh
+      - run:
+          name: Tag latest image, push, and update ECS
+          command: |-
+            export SDLC=${SDLC}
+            echo ${SDLC}
+            echo "Nothing to Do"
+            VERSION="${CIRCLE_TAG}" ./scripts/build/release.sh
+            echo ${VERSION}
+      # - run:
+      #     name: Trigger automation
+      #     command: |-
+      #       ./scripts/build/automation.sh
+      - run:
+          name: Notify on Deployment Failure
+          when: on_fail
+          command: |
+            ./scripts/build/fail.sh
+  nonprod-environment: &nonprod-environment
+    ACCOUNT_ID: NONPROD_AWS_ACCOUNT_ID
+    REGION: NONPROD_AWS_REGION
+    AWS_KEY: NONPROD_CODE_DEPLOY_AWS_KEY
+    AWS_SECRET: NONPROD_CODE_DEPLOY_AWS_SECRET
+
+  deploy: &deploy
+    docker:
+      - image: docker:18.02.0-ce-git
+    <<: *steps
+
+jobs:
+  test:
+    docker:
+      - image: node:12.13.0
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Test
+          command: |
+            npm install
+            npm install mocha
+            npm run build
+            npm run test
+            cd ../../
+      # Upload test results to artifacts
+      - store_test_results:
+          path: /tmp/test-reports
+      - store_artifacts:
+          path: /tmp/test-results
+          destination: test_results
+  container:
+    docker:
+      - image: node:12.13.0
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Install Docker client and dependencies
+          command: |
+            set -x
+            VER="18.03.0-ce"
+            curl -L -o /tmp/docker-$VER.tgz https://download.docker.com/linux/static/stable/x86_64/docker-$VER.tgz
+            tar -xz -C /tmp -f /tmp/docker-$VER.tgz
+            mv /tmp/docker/* /usr/bin
+            apt-get update
+            apt-get install -y jq
+            chmod +x scripts/build/tag.sh
+            chmod +x scripts/build/release.sh
+            chmod +x scripts/build/fail.sh
+            echo 'Scripts Made Executable'
+      - run:
+          name: Build image and push container to artifactory
+          command: |-
+            echo ${CIRCLE_TAG}
+            docker login -u $ARTIFACTORY_DOCKER_REGISTRY_USER -p $ARTIFACTORY_DOCKER_REGISTRY_PASSWORD <container login>
+            docker build --pull -t <container path> .
+            docker push <containers path>
+            VERSION="${CIRCLE_TAG}" ./scripts/build/tag.sh
+  deploy-dev:
+    <<: *deploy
+    environment:
+      <<: *nonprod-environment
+      SDLC: dev
+  # deploy-qastg:
+  #   <<: *deploy
+  #   environment:
+  #     <<: *nonprod-environment
+  #     SDLC: dev
+  deploy-qastg:
+    <<: *deploy
+    environment:
+      <<: *nonprod-environment
+      SDLC: qastg
+  # deploy-qalv:
+  #   <<: *deploy
+  #   environment:
+  #     <<: *nonprod-environment
+  #     SDLC: qalv
+  # deploy-demo:
+  #   <<: *deploy
+  #   environment:
+  #     <<: *nonprod-environment
+  #     SDLC: demo
+  # deploy-pqa:
+  #   <<: *deploy
+  #   environment:
+  #     <<: *nonprod-environment
+  #     SDLC: pqa
+  # deploy-prod:
+  #   <<: *deploy
+  #   environment:
+  #     <<: *prod-environment
+  #     SDLC: prod
+workflows:
+  version: 2
+  build:
+    jobs:
+      - test:
+          filters:
+            branches:
+              ignore:
+                - /.*/
+            tags:
+              only:
+                - /.*/
+      - container:
+          requires:
+            - test
+          filters:
+            branches:
+              ignore:
+                - /.*/
+            tags:
+              only:
+                - /.*/
+      - deploy-dev:
+          requires:
+            - container
+          filters:
+            branches:
+              ignore:
+                - /.*/
+            tags:
+              only:
+                - /.*/
+      # - deploy-qastg:
+      #     requires:
+      #       - container
+      #     filters:
+      #       branches:
+      #         only:
+      #           - feature/config-fetch-changes
+      # - deploy-qalv:
+      #     requires:
+      #      - test
+      #     filters:
+      #      branches:
+      #       ignore:
+      #         - /.*/
+      #      tags:
+      #       only:
+      #         - /release-qalv-.*/
+      # - deploy-demo:
+      #     requires:
+      #      - test
+      #     filters:
+      #      branches:
+      #       ignore:
+      #         - /.*/
+      #      tags:
+      #       only:
+      #         - /release-demo-.*/
+      #         - /release-nonprod-.*/
+      # - deploy-pqa:
+      #     requires:
+      #      - test
+      #     filters:
+      #      branches:
+      #       ignore:
+      #         - /.*/
+      #      tags:
+      #       only:
+      #         - /release-pqa-.*/
+      #         - /release-nonprod-.*/
+  # prod-builds:
+  #   jobs:
+  #     - hold-scan:
+  #         type: approval
+  #         filters:
+  #           branches:
+  #             ignore:
+  #               - /.*/
+  #           tags:
+  #             only:
+  #               - /release-prod-.*/
+  #     - vulnerability-scan:
+  #         requires:
+  #           - hold-scan
+  #         filters:
+  #           branches:
+  #             ignore:
+  #               - /.*/
+  #           tags:
+  #             only:
+  #               - /release-prod-.*/
+  #     - hold-prod:
+  #         type: approval
+  #         filters:
+  #           branches:
+  #             ignore:
+  #               - /.*/
+  #           tags:
+  #             only:
+  #               - /release-prod-.*/
+  #     - deploy-prod:
+  #         requires:
+  #           - hold-prod
+  #         filters:
+  #           branches:
+  #             ignore:
+  #               - /.*/
+  #           tags:
+  #             only:
+  #               - /release-prod-.*/
